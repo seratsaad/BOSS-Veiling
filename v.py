@@ -141,11 +141,12 @@ interpolator_ph = RegularGridInterpolator((Teff, Logg), arr)
 
 
 s["Av"] = 0.
+s["Chisquare_list"] = Column(length=len(s),dtype=float, shape=(4,))+np.nan
 s["veiling_arr"] = Column(length=len(s),dtype=float, shape=(70,))+np.nan
 
 arr = np.arange(0, 67, 1)
 
-for i in tqdm(range(10)):
+for i in tqdm(range(100)):
     try:
         Teff_obs = 10**(s["u_med_logteff"][i])
         Logg_obs = s["u_med_logg"][i]
@@ -174,8 +175,8 @@ for i in tqdm(range(10)):
         
         synthetic_flux=np.interp(wavelengths_obs,wavelengths_obs[b],synthetic_flux[b])
         
-        print(synthetic_flux, flux_obs, err_obs)
         params, _ = curve_fit(model_flux_Av, synthetic_flux, flux_obs, bounds=(0, 100), sigma=err_obs)
+        
         s['Av'][i] = params[0]
         
         flux_correct = synthetic_flux*ext_model.extinguish(wavelengths_obs, Av=params[0])
@@ -190,21 +191,42 @@ for i in tqdm(range(10)):
        
             
         for j in range(len(wl_arr)):
-            synthetic_flux_step = flux_correct_arr[j]
-            synthetic_flux_step = synthetic_flux_step/np.median(synthetic_flux_step)
+            synthetic_flux_step = flux_correct_arr[j]/np.median(flux_correct_arr[j])
+        
+            flux_obs_step=flux_obs_arr[j]/np.median(flux_obs_arr[j])
+            flux_obs_arr[j]=flux_obs_step
             
-            flux_obs_step = flux_obs_arr[j]
-            flux_obs_step = flux_obs_step/np.median(flux_obs_step)
-            
-            err_obs_step=err_obs_arr[j]
-            err_obs_step = err_obs_step/np.median(flux_obs_step)
+            err_obs_step=err_obs_arr[j]/np.median(flux_obs_step)
+            err_obs_arr[j]=err_obs_step
             
             wl_step = wl_arr[j]
             
             params, _ = curve_fit(model_flux_veiling, synthetic_flux_step, flux_obs_step, bounds=(0, 20), sigma=err_obs_step)
-            synthetic_flux_step = (synthetic_flux_step + params[0]) / (1+params[0])
-            flux_correct_arr[j] = synthetic_flux_step.tolist()
+            flux_correct_arr[j] = (synthetic_flux_step + params[0]) / (1+params[0])
             veiling_arr.append(params[0])
+            
+        # chi square for each range
+        
+        wl_arr_comb = np.concatenate(wl_arr)
+        err_obs_comb = np.concatenate(err_obs_arr)
+        flux_correct_comb = np.concatenate(flux_correct_arr)
+        flux_obs_comb = np.concatenate(flux_obs_arr)
+        
+        range1_mask = np.where((wl_arr_comb > 5500) & (wl_arr_comb < 6500))
+        range2_mask = np.where((wl_arr_comb > 6600) & (wl_arr_comb < 7600))
+        range3_mask = np.where((wl_arr_comb > 7600) & (wl_arr_comb < 8600))
+        range4_mask = np.where((wl_arr_comb > 8600) & (wl_arr_comb < 9600))
+        
+        
+        chi_square_range1 = np.sum(((flux_obs_comb[range1_mask] - flux_correct_comb[range1_mask]) / err_obs_comb[range1_mask]) ** 2)
+        chi_square_range2 = np.sum(((flux_obs_comb[range2_mask] - flux_correct_comb[range2_mask]) / err_obs_comb[range2_mask]) ** 2)
+        chi_square_range3 = np.sum(((flux_obs_comb[range3_mask] - flux_correct_comb[range3_mask]) / err_obs_comb[range3_mask]) ** 2)
+        chi_square_range4 = np.sum(((flux_obs_comb[range4_mask] - flux_correct_comb[range4_mask]) / err_obs_comb[range4_mask]) ** 2)
+
+        s["Chisquare_list"][i][0] = chi_square_range1
+        s["Chisquare_list"][i][1] = chi_square_range2
+        s["Chisquare_list"][i][2] = chi_square_range3
+        s["Chisquare_list"][i][3] = chi_square_range4
         
             
         s["veiling_arr"][i][0 : len(veiling_arr)] = veiling_arr
@@ -212,7 +234,8 @@ for i in tqdm(range(10)):
     
 
     except:
+        print(f"Dead index: {i}")
         continue
 
     
-s.write("emission_nyso.fits", overwrite=True)
+s.write("lineforest_veiling.fits", overwrite=True)
