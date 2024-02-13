@@ -1,0 +1,250 @@
+# s. saad
+
+
+# import block
+###############################
+###############################
+
+import numpy as np
+import glob
+import matplotlib.pyplot as plt
+from astropy.table import table, column
+from tqdm import tqdm
+import math
+from astropy.io import fits
+import astropy.units as u
+from scipy.interpolate import regulargridinterpolator
+from dust_extinction.parameter_averages import f99
+from dust_extinction.parameter_averages import g23
+from scipy.signal import savgol_filter
+from scipy.optimize import curve_fit
+import matplotlib.cm as cm
+import sys
+import warnings
+warnings.filterwarnings("ignore", category=userwarning)
+
+
+
+# functions
+###############################
+###############################
+def reading_obs(file_path, rv):
+    hdul = fits.open(file_path)
+    t = hdul[1].data
+    a = np.where((t["ivar"] > np.median(t["ivar"])/10) & (np.isfinite(t['ivar'])==true))[0]
+    flux = t["flux"][a] / np.median(t["flux"][a])
+    wl2 = 10**(t["loglam"][a])
+    wl2 = wl2 + wl2*(rv/299792.458)
+    err=(np.sqrt(1./t["ivar"][a]))/np.nanmedian(flux)
+    #a = np.where((wl2<x) & (wl2>=x))[0]
+    #flux = flux[a]
+    #wl2 = wl2[a]
+    return flux, wl2,err
+
+
+def divide_in_steps(flux, wl2):
+    total_steps = int(((max(wl2)-min(wl2))//100))
+    wl2_arr = []
+    flux_arr = []
+    for i in range(total_steps):
+        x = ((min(wl2)//100)*100) + 100*i
+        a = np.where((wl2<x+1000) & (wl2>=x))[0]
+        flux_new = flux[a]
+        wl2_new = wl2[a]
+        flux_arr.append(flux_new)
+        wl2_arr.append(wl2_new)
+    return flux_arr, wl2_arr
+
+def reading_ph(teff, logg):
+    hdul = fits.open(f"phoenix_fits/lte0{teff}-{logg}0-0.0.phoenix-aces-agss-cond-2011-hires.fits")
+    primary_hdu = hdul[0]
+    data = primary_hdu.data
+    header = primary_hdu.header
+    wl1 = np.arange(header["naxis1"])*header["cdelt1"]+header["crval1"]
+    data = data/np.median(data)
+    return data, wl1
+    
+def model_flux_veiling(flux, v_const):
+    flux = (flux/np.median(flux)) + v_const
+    flux = flux/(1+v_const)
+    return flux/np.median(flux)
+
+def reinterp(wavelengths_obs,wavelengths_ph, flux_ph):
+    ll=np.diff(wavelengths_obs)
+    d=[ll[0]]
+    d.extend(ll)
+    d.append(ll[-1])
+    d=np.array(d)
+    l1=wavelengths_obs-d[:-1]*0.5
+    l2=wavelengths_obs+d[1:]*0.5
+    
+    synthetic_flux=np.zeros(len(l1))
+    for j in range(len(l1)):
+        ax=np.where((wavelengths_ph>l1[j]) & (wavelengths_ph<l2[j]))[0]
+        synthetic_flux[j]=np.sum(flux_ph[ax])/len(ax)
+
+    return synthetic_flux
+    
+
+
+def main(num):
+    if len(num) != 1:
+        print("this script requires exactly one argument for the index.")
+        sys.exit(1)
+
+    def model_flux_av(synthetic_flux, av):
+        ext_model = g23(rv=3.1)
+        flux_corrected = synthetic_flux * ext_model.extinguish(wavelengths_obs, av=av)
+        flux = flux_corrected/np.median(flux_corrected)
+        return flux
+
+    # main
+    ###############################
+    ###############################
+    
+    s = table.read("lineforest_boss.fits")
+    print(num)
+    a=np.arange(int(num[0]),len(s),20)
+    s=s[a]
+
+    teff = round(10**(s["u_med_logteff"][0])/100)*100
+    logg = round(s["u_med_logg"][0] / 0.5)*0.5
+
+
+    _, wavelengths_ph = reading_ph(teff, logg) # the common wavelength range of the phoenix data
+    
+
+    ext_model = g23(rv=3.1)
+
+
+    # saving all the possible teff and logg in the phoenix data
+    a = glob.glob("phoenix_fits/lte0*-*0-0.0.phoenix-aces-agss-cond-2011-hires.fits")
+    teff = []
+    logg = []
+
+    for i in range(len(a)):
+        file = a[i]
+        splt = file.split("lte")
+        teff = int(splt[1].split("-")[0])
+        logg = float(splt[1].split("-")[1])
+        teff.append(teff)
+        logg.append(logg)
+
+    teff = np.unique(teff)
+    logg = np.unique(logg)
+
+
+    # array used to interpolate
+    arr = np.zeros((len(teff), len(logg), len(wavelengths_ph)),)
+
+
+    for i in range(len(teff)):
+        for j in range(len(logg)):
+            try:
+                flux1, wl1 = reading_ph(teff[i], logg[j])
+                arr[i][j] = flux1
+            except:
+                continue
+            
+    interpolator_ph = regulargridinterpolator((teff, logg), arr)
+
+
+    s["av"] = 0.
+    s["chisquare_list"] = column(length=len(s),dtype=float, shape=(4,))+np.nan
+    s["veiling_arr"] = column(length=len(s),dtype=float, shape=(70,))+np.nan
+
+    arr = np.arange(0, 67, 1)
+
+    for i in tqdm(range(len(s))):
+        try:    
+            teff_obs = 10**(s["u_med_logteff"][i])
+            logg_obs = s["u_med_logg"][i]
+            healpix = s["healpix_path"][i]
+            file_path = f"/uufs/chpc.utah.edu/common/home/sdss50/sdsswork/mwm/spectro/healpix{healpix[12:]}"
+            rv = s["xcsao_rv"][i]
+    
+            flux_obs, wavelengths_obs, err_obs = reading_obs(file_path, rv)
+        
+            flux_ph = interpolator_ph((teff_obs, logg_obs))
+            synthetic_flux = reinterp(wavelengths_obs, wavelengths_ph, flux_ph)
+        
+            wavelengths_obs = wavelengths_obs * u.aa
+            wavenumbers = (1.0 / wavelengths_obs)
+            a = np.where((wavenumbers >= 0.03125/u.micron) & (wavenumbers <= 10.964912280701753/u.micron) & (wavenumbers != np.nan))[0]
+            synthetic_flux = synthetic_flux[a]
+            wavelengths_obs = wavelengths_obs[a]
+            flux_obs = flux_obs[a]
+            err_obs=err_obs[a]    
+            
+
+            synthetic_flux = synthetic_flux/np.nanmedian(synthetic_flux)
+            b = np.where(np.isfinite(synthetic_flux) == true)[0]
+        
+            synthetic_flux=np.interp(wavelengths_obs,wavelengths_obs[b],synthetic_flux[b])
+        
+            params, _ = curve_fit(model_flux_av, synthetic_flux, flux_obs, bounds=(0, 100), sigma=err_obs)
+        
+            s['av'][i] = params[0]
+        
+            flux_correct = synthetic_flux*ext_model.extinguish(wavelengths_obs, av=params[0])
+            flux_correct = flux_correct/np.median(flux_correct)
+            wavelengths_obs = wavelengths_obs/u.aa
+        
+            flux_correct_arr, wl_arr = divide_in_steps(flux_correct, wavelengths_obs)
+            flux_obs_arr, wl_arr = divide_in_steps(flux_obs, wavelengths_obs)
+            err_obs_arr, wl_arr = divide_in_steps(err_obs, wavelengths_obs)
+        
+            veiling_arr = []
+       
+            
+            for j in range(len(wl_arr)):
+                synthetic_flux_step = flux_correct_arr[j]/np.median(flux_correct_arr[j])
+        
+                flux_obs_step=flux_obs_arr[j]/np.median(flux_obs_arr[j])
+                flux_obs_arr[j]=flux_obs_step
+            
+                err_obs_step=err_obs_arr[j]/np.median(flux_obs_step)
+                err_obs_arr[j]=err_obs_step
+            
+                wl_step = wl_arr[j]
+            
+                params, _ = curve_fit(model_flux_veiling, synthetic_flux_step, flux_obs_step, bounds=(0, 20), sigma=err_obs_step)
+                flux_correct_arr[j] = (synthetic_flux_step + params[0]) / (1+params[0])
+                veiling_arr.append(params[0])
+            
+            # chi square for each range
+        
+            wl_arr_comb = np.concatenate(wl_arr)
+            err_obs_comb = np.concatenate(err_obs_arr)
+            flux_correct_comb = np.concatenate(flux_correct_arr)
+            flux_obs_comb = np.concatenate(flux_obs_arr)
+        
+            range1_mask = np.where((wl_arr_comb > 5500) & (wl_arr_comb < 6500))
+            range2_mask = np.where((wl_arr_comb > 6600) & (wl_arr_comb < 7600))
+            range3_mask = np.where((wl_arr_comb > 7600) & (wl_arr_comb < 8600))
+            range4_mask = np.where((wl_arr_comb > 8600) & (wl_arr_comb < 9600))
+        
+        
+            chi_square_range1 = np.sum(((flux_obs_comb[range1_mask] - flux_correct_comb[range1_mask]) / err_obs_comb[range1_mask]) ** 2)
+            chi_square_range2 = np.sum(((flux_obs_comb[range2_mask] - flux_correct_comb[range2_mask]) / err_obs_comb[range2_mask]) ** 2)
+            chi_square_range3 = np.sum(((flux_obs_comb[range3_mask] - flux_correct_comb[range3_mask]) / err_obs_comb[range3_mask]) ** 2)
+            chi_square_range4 = np.sum(((flux_obs_comb[range4_mask] - flux_correct_comb[range4_mask]) / err_obs_comb[range4_mask]) ** 2)
+
+            s["chisquare_list"][i][0] = chi_square_range1
+            s["chisquare_list"][i][1] = chi_square_range2
+            s["chisquare_list"][i][2] = chi_square_range3
+            s["chisquare_list"][i][3] = chi_square_range4
+            
+            s["veiling_arr"][i][0 : len(veiling_arr)] = veiling_arr
+            
+        except:
+            print(f"dead index: {i}")
+            continue
+    #s.write("lineforest_veiling.fits", overwrite=true)
+
+    s.write(f"lineforest_veiling{num[0]}.fits", overwrite=true)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+
