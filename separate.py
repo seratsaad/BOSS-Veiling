@@ -40,24 +40,17 @@ wl_arr = t['wavelength_arr'][0]
 t["corrected_veiling_arr"] = Column(length=len(t),dtype=float, shape=(70,))+np.nan
 t["corrected_wavelength_arr"] = Column(length=len(t),dtype=float, shape=(70,))+np.nan
 
-for i in range(len(t)):
-    veiling_arr = t['veiling_arr']
-    good_wl = t['good_wl']
+for i in tqdm(range(len(t))):
+    veiling_arr = t['veiling_arr'][i]
+    good_wl = t['good_wl'][i]
     
     a = np.where(wl_arr < good_wl)[0]
+    
     c_veiling_arr = veiling_arr[a]
     c_wavelength_arr = wl_arr[a]
     
-    t["corrected_wavelength_arr"][0:len(a)] = c_veiling_arr
-    t["corrected_veiling_arr"][0:len(a)] = c_wavelength_arr
+    t["corrected_veiling_arr"][i][0:len(a)] = c_veiling_arr
+    t["corrected_wavelength_arr"][i][0:len(a)] = c_wavelength_arr
     
     
 t.write('ctts_veiling.fits', overwrite=True)
-    
-    
-    
-    
-    
-    
-    
-    
